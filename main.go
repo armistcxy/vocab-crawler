@@ -2,11 +2,13 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gocolly/colly"
 )
@@ -96,7 +98,7 @@ type CrawlVocabResponse struct {
 
 func (resp CrawlVocabResponse) String() string {
 	if resp.err != nil {
-		return fmt.Sprintf("Faild when crawl, error: %s", resp.err.Error())
+		return fmt.Sprintf("Failed when crawl, error: %s", resp.err.Error())
 	}
 	return fmt.Sprintf("Result of crawl, vocab: %s", resp.vocab)
 }
@@ -189,26 +191,63 @@ func CrawlHandle(vocabUrls <-chan URL) <-chan CrawlVocabResponse {
 	return responses
 }
 
+// There no need to abstract here, further abstraction for worker, coordinator and task will be implemented in other project
+
+type Worker struct {
+	restTime time.Duration // avoid rate limit
+}
+
+func (w Worker) work(vocabUrls <-chan URL, results chan<- CrawlVocabResponse) {
+	for url := range vocabUrls {
+		CrawlVocab(url, results)
+		time.Sleep(w.restTime)
+	}
+}
+
 func main() {
 	seeds := getSeed()
+	numberOfWorker := flag.Int("worker", 8, "Number of workers (default is 8)")
+	rate := flag.Int("rate", 5, "Maximum number of requests that each worker does per second")
+
+	flag.Parse()
+
+	restTime := time.Second / time.Duration(*rate)
+	vocabUrls := make(chan URL)
+	results := make(chan CrawlVocabResponse)
+
+	for range *numberOfWorker {
+		w := Worker{
+			restTime: restTime,
+		}
+		go w.work(vocabUrls, results)
+	}
 
 	for _, seed := range seeds[2:] {
 		indexes := ExtractIndex(seed)
 		var wg sync.WaitGroup
 		for index := range indexes {
-			vocabUrls := CrawlVocabURL(index)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				responses := CrawlHandle(vocabUrls)
+			urls := CrawlVocabURL(index)
+			//wg.Add(1)
+			//go func() {
+			//	defer wg.Done()
+			//	responses := CrawlHandle(vocabUrls)
 
-				for response := range responses {
-					fmt.Println(response)
+			//  for response := range responses {
+			//		fmt.Println(response)
+			//	}
+			//}()
+			go func() {
+				for url := range urls {
+					vocabUrls <- url // forgive me for this double pipe qWq, I don't want to change code too much
 				}
 			}()
 		}
 		wg.Wait()
 		break
+	}
+
+	for response := range results {
+		fmt.Println(response)
 	}
 
 }
